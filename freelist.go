@@ -28,11 +28,14 @@ type freelist struct {
 	freemaps       map[uint64]pidSet           // key is the size of continuous pages(span), value is a set which contains the starting pgids of same size
 	forwardMap     map[pgid]uint64             // key is start pgid, value is its span size
 	backwardMap    map[pgid]uint64             // key is end pgid, value is its span size
+	hmapFreeCount  int                         // hmapFreeCount caches count of free page ids in hashmap.
 	allocate       func(txid txid, n int) pgid // the freelist allocate func
 	free_count     func() int                  // the function which gives you free page number
 	mergeSpans     func(ids pgids)             // the mergeSpan func
 	getFreePageIDs func() []pgid               // get free pgids func
 	readIDs        func(pgids []pgid)          // readIDs func reads list of pages and init the freelist
+
+	getFreePageIDsUnsorted func() []pgid // get free pgids func, pgids do not need to be sorted
 }
 
 // newFreelist returns an empty, initialized freelist.
@@ -53,12 +56,14 @@ func newFreelist(freelistType FreelistType) *freelist {
 		f.mergeSpans = f.hashmapMergeSpans
 		f.getFreePageIDs = f.hashmapGetFreePageIDs
 		f.readIDs = f.hashmapReadIDs
+		f.getFreePageIDsUnsorted = f.hashmapGetFreePageIDsUnsorted
 	} else {
 		f.allocate = f.arrayAllocate
 		f.free_count = f.arrayFreeCount
 		f.mergeSpans = f.arrayMergeSpans
 		f.getFreePageIDs = f.arrayGetFreePageIDs
 		f.readIDs = f.arrayReadIDs
+		f.getFreePageIDsUnsorted = f.arrayGetFreePageIDs
 	}
 
 	return f
@@ -102,6 +107,15 @@ func (f *freelist) copyall(dst []pgid) {
 	}
 	sort.Sort(m)
 	mergepgids(dst, f.getFreePageIDs(), m)
+}
+
+// copyAllUnsorted copies into dst a list of all free ids and pending ids in a list.
+// All ids in the list are unsorted.
+func (f *freelist) copyAllUnsorted(dst []pgid) {
+	for _, txp := range f.pending {
+		dst = dst[copy(dst, txp.ids):]
+	}
+	copy(dst, f.getFreePageIDsUnsorted())
 }
 
 // arrayAllocate returns the starting page id of a contiguous list of pages of a given size.
@@ -325,14 +339,14 @@ func (f *freelist) write(p *page) error {
 		var ids []pgid
 		data := unsafeAdd(unsafe.Pointer(p), unsafe.Sizeof(*p))
 		unsafeSlice(unsafe.Pointer(&ids), data, l)
-		f.copyall(ids)
+		f.copyAllUnsorted(ids)
 	} else {
 		p.count = 0xFFFF
 		var ids []pgid
 		data := unsafeAdd(unsafe.Pointer(p), unsafe.Sizeof(*p))
 		unsafeSlice(unsafe.Pointer(&ids), data, l+1)
 		ids[0] = pgid(l)
-		f.copyall(ids[1:])
+		f.copyAllUnsorted(ids[1:])
 	}
 
 	return nil

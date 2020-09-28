@@ -4,12 +4,7 @@ import "sort"
 
 // hashmapFreeCount returns count of free pages(hashmap version)
 func (f *freelist) hashmapFreeCount() int {
-	// use the forwardMap to get the total count
-	count := 0
-	for _, size := range f.forwardMap {
-		count += int(size)
-	}
-	return count
+	return f.hmapFreeCount
 }
 
 // hashmapAllocate serves the same purpose as arrayAllocate, but use hashmap as backend
@@ -75,14 +70,43 @@ func (f *freelist) hashmapGetFreePageIDs() []pgid {
 		return nil
 	}
 
+	type span struct {
+		start pgid
+		size  uint64
+	}
+	spans := make([]span, 0, len(f.forwardMap))
+	for start, size := range f.forwardMap {
+		spans = append(spans, span{start, size})
+	}
+	sort.Slice(spans, func(i, j int) bool {
+		return spans[i].start < spans[j].start
+	})
+
+	m := make([]pgid, 0, count)
+	for _, span := range spans {
+		if len(m) > 0 && span.start <= m[len(m)-1] {
+			panic("span is overlapped")
+		}
+		for i := 0; i < int(span.size); i++ {
+			m = append(m, span.start+pgid(i))
+		}
+	}
+	return m
+}
+
+// hashmapGetFreePageIDs returns the unsorted free page ids
+func (f *freelist) hashmapGetFreePageIDsUnsorted() []pgid {
+	count := f.free_count()
+	if count == 0 {
+		return nil
+	}
+
 	m := make([]pgid, 0, count)
 	for start, size := range f.forwardMap {
 		for i := 0; i < int(size); i++ {
 			m = append(m, start+pgid(i))
 		}
 	}
-	sort.Sort(pgids(m))
-
 	return m
 }
 
@@ -130,6 +154,7 @@ func (f *freelist) addSpan(start pgid, size uint64) {
 	}
 
 	f.freemaps[size][start] = struct{}{}
+	f.hmapFreeCount += int(size)
 }
 
 func (f *freelist) delSpan(start pgid, size uint64) {
@@ -139,6 +164,7 @@ func (f *freelist) delSpan(start pgid, size uint64) {
 	if len(f.freemaps[size]) == 0 {
 		delete(f.freemaps, size)
 	}
+	f.hmapFreeCount -= int(size)
 }
 
 // initial from pgids using when use hashmap version
